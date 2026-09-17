@@ -7,62 +7,81 @@
  * `initialize` handshake clients, served statelessly, and modern 2026-07-28
  * envelope clients, served natively). The factory reads the gateway's
  * per-request credential header and returns a thin Server whose `tools/list`
- * and `tools/call` handlers delegate to the pooled child MCP session for that
- * tenant.
+ * and `tools/call` handlers delegate to the pooled child MCP session.
  *
- * Tool names pass through unchanged; the SURFACE does not. Both directions are
- * filtered against `tools.ts`:
- *   - tools/list omits blocked tools and strips write-capable arguments from
- *     the schemas it does return.
- *   - tools/call refuses blocked tools outright, and re-strips those same
- *     arguments so a client working from a stale or ignored schema still
- *     cannot reach a write path.
+ * Note what is NOT declared here: `capabilities` contains only `tools`, and
+ * only `tools/list` and `tools/call` are registered. Upstream also serves
+ * `prompts/list` — including `ksm_confirm_action`, the prompt that drives its
+ * confirmation flow — and that entire surface is unreachable through this
+ * bridge as a result. That is the one boundary in this repo enforced by
+ * construction rather than by name matching; do not add prompt passthrough
+ * "for completeness" without re-reading the header of tools.ts.
  */
 import { Server, type McpServerFactory } from "@modelcontextprotocol/server";
+import type { Client } from "@modelcontextprotocol/client";
 import { resolveCredentials, type KeeperCredentials } from "./credentials.js";
-import { ALLOWED_TOOLS, filterTools, isAllowed, refusalMessage, stripToolArgs } from "./tools.js";
+import { ALLOWED_TOOL_NAMES, filterTools, isAllowed, pickToolArgs, refusalMessage } from "./tools.js";
 import type { ChildPool } from "./pool.js";
 
 export const SERVER_NAME = "keeper-mcp";
 export const SERVER_VERSION = "1.0.0";
 
-const MISSING_CREDS_MESSAGE =
-  "Missing Keeper credentials. Send X-Keeper-Config-Base64 with the base64 device " +
-  "configuration from Keeper Vault > Secrets Manager > your application > Devices.";
-
 const INSTRUCTIONS =
-  `Keeper Secrets Manager, served read-only. ${Object.keys(ALLOWED_TOOLS).length} tools are ` +
-  "available for finding and reading vault records: list_secrets, search_secrets and " +
-  "list_folders return metadata; get_secret, get_field (KSM notation) and get_totp_code " +
-  "return credential material; download_file returns attachments inline. Creating, " +
+  "Keeper Secrets Manager, served read-only. Available tools: " +
+  `${ALLOWED_TOOL_NAMES.join(", ")}. ` +
+  "list_secrets, search_secrets and list_folders return metadata only; get_secret, " +
+  "get_field (KSM notation) and get_totp_code return credential material. Creating, " +
   "modifying and deleting vault data is not exposed, and neither is the bulk " +
   "unmasked-export tool. Scope is set by the Keeper application's own folder access and " +
   "record permissions — this server can never reach beyond them. Treat every value " +
   "returned as live credential material: do not echo it into tickets, commits or logs.";
 
 /**
- * Create a fresh thin server bound to one tenant's credentials.
+ * Process-wide memo of the served tool surface.
  *
- * `creds` may be absent only on paths the HTTP 401 gate did not cover
- * (defensive); handlers then answer a clear error instead of ever falling
- * through to environment credentials — that would be a cross-tenant leak.
+ * Upstream's tool table is a hardcoded slice that consults no config, and our
+ * filter is static, so the result is identical for every tenant. Without this,
+ * a client that merely BROWSES the surface spawns a Keeper child and leaves an
+ * authenticated KSM session in memory for the full idle window without ever
+ * calling a tool — the opposite of the posture the pool's short eviction
+ * window is chosen for.
+ *
+ * Trade-off accepted: a well-formed config that Keeper nonetheless rejects now
+ * surfaces on the first tools/call rather than on tools/list. The 401 gate
+ * still catches malformed configs, and a clear error on first use beats the
+ * gateway's silent tool-fetch failure.
  */
-export function createBridgeServer(pool: ChildPool, creds?: KeeperCredentials): Server {
+type ListedTools = Awaited<ReturnType<Client["listTools"]>>["tools"];
+
+class ToolSurfaceCache {
+  private tools: ListedTools | null = null;
+
+  async get(load: () => Promise<ListedTools>): Promise<ListedTools> {
+    this.tools ??= await load();
+    return this.tools;
+  }
+}
+
+/** Create a fresh thin server bound to one tenant's credentials. */
+export function createBridgeServer(
+  pool: ChildPool,
+  creds: KeeperCredentials,
+  toolCache: ToolSurfaceCache,
+): Server {
   const server = new Server(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: {} }, instructions: INSTRUCTIONS },
   );
 
-  server.setRequestHandler("tools/list", async () => {
-    if (!creds) throw new Error(MISSING_CREDS_MESSAGE);
-    const client = await pool.getSession(creds);
-    const { tools } = await client.listTools();
-    return { tools: filterTools(tools) };
-  });
+  server.setRequestHandler("tools/list", async () => ({
+    tools: await toolCache.get(async () => {
+      const client = await pool.getSession(creds);
+      const { tools } = await client.listTools();
+      return filterTools(tools);
+    }),
+  }));
 
   server.setRequestHandler("tools/call", async (request) => {
-    if (!creds) throw new Error(MISSING_CREDS_MESSAGE);
-
     const toolName = request.params.name;
     // Refuse BEFORE touching the pool: a blocked tool must not even cause a
     // child to spawn, and the refusal must not depend on KSM being reachable.
@@ -77,7 +96,7 @@ export function createBridgeServer(pool: ChildPool, creds?: KeeperCredentials): 
     try {
       return await client.callTool({
         ...request.params,
-        arguments: stripToolArgs(toolName, request.params.arguments),
+        arguments: pickToolArgs(toolName, request.params.arguments),
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -91,12 +110,37 @@ export function createBridgeServer(pool: ChildPool, creds?: KeeperCredentials): 
   return server;
 }
 
+/**
+ * A server for a request the 401 gate did not cover (defensive — it should be
+ * unreachable). Every handler answers the same error, so there is no path on
+ * which a missing credential falls through to environment credentials.
+ */
+function createUnauthorizedServer(): Server {
+  const server = new Server(
+    { name: SERVER_NAME, version: SERVER_VERSION },
+    { capabilities: { tools: {} } },
+  );
+  const refuse = async (): Promise<never> => {
+    throw new Error(
+      "Missing Keeper credentials. Send X-Keeper-Config-Base64 with the base64 device " +
+        "configuration from Keeper Vault > Secrets Manager > your application > Devices.",
+    );
+  };
+  server.setRequestHandler("tools/list", refuse);
+  server.setRequestHandler("tools/call", refuse);
+  return server;
+}
+
 /** Bind the pool into the McpServerFactory shape `createMcpHandler` consumes. */
 export function makeMcpServerFactory(pool: ChildPool): McpServerFactory {
+  // One cache per handler — process-wide in production, isolated per test.
+  const toolCache = new ToolSurfaceCache();
   return (ctx) => {
-    const { creds } = resolveCredentials(
+    const result = resolveCredentials(
       (name) => ctx.requestInfo?.headers.get(name) ?? undefined,
     );
-    return createBridgeServer(pool, creds);
+    return result.ok
+      ? createBridgeServer(pool, result.creds, toolCache)
+      : createUnauthorizedServer();
   };
 }

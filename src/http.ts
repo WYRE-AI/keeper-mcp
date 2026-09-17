@@ -12,7 +12,7 @@ import { createMcpHandler, type McpHttpHandler } from "@modelcontextprotocol/ser
 import { toNodeHandler } from "@modelcontextprotocol/node";
 import { makeMcpServerFactory, SERVER_VERSION } from "./bridge.js";
 import { GATEWAY_HEADERS, resolveCredentials } from "./credentials.js";
-import { ALLOWED_TOOLS } from "./tools.js";
+import { ALLOWED_TOOL_NAMES } from "./tools.js";
 import type { ChildPool } from "./pool.js";
 
 const CORS_ALLOW_HEADERS = [
@@ -30,22 +30,20 @@ export interface BridgeHttp {
   closeMcpHandler: () => Promise<void>;
 }
 
+const logError =
+  (label: string) =>
+  (error: unknown): void => {
+    process.stderr.write(
+      `[ksm] MCP ${label} error: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  };
+
 export function createBridgeHttpServer(pool: ChildPool): BridgeHttp {
   const mcpHandler: McpHttpHandler = createMcpHandler(makeMcpServerFactory(pool), {
     legacy: "stateless", // dual-era posture — never 'reject' on fleet servers
-    onerror: (error) => {
-      process.stderr.write(
-        `[ksm] MCP serving error: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    },
+    onerror: logError("serving"),
   });
-  const handleMcp = toNodeHandler(mcpHandler, {
-    onerror: (error) => {
-      process.stderr.write(
-        `[ksm] MCP request adapter error: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    },
-  });
+  const handleMcp = toNodeHandler(mcpHandler, { onerror: logError("request adapter") });
 
   const httpServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     res.setHeader("Access-Control-Allow-Origin", "*");
@@ -69,7 +67,7 @@ export function createBridgeHttpServer(pool: ChildPool): BridgeHttp {
           status: "ok",
           version: SERVER_VERSION,
           mode: "read-only",
-          tools: Object.keys(ALLOWED_TOOLS).length,
+          tools: ALLOWED_TOOL_NAMES.length,
           tenants: pool.size,
           timestamp: new Date().toISOString(),
         }),
@@ -78,18 +76,18 @@ export function createBridgeHttpServer(pool: ChildPool): BridgeHttp {
     }
 
     if (url.pathname === "/mcp") {
-      const { error } = resolveCredentials((name) => {
+      const result = resolveCredentials((name) => {
         const value = req.headers[name];
         return Array.isArray(value) ? value[0] : value;
       });
-      if (error) {
+      if (!result.ok) {
         res.writeHead(401, { "Content-Type": "application/json" });
         res.end(
           JSON.stringify({
             jsonrpc: "2.0",
             error: {
               code: -32001,
-              message: `Unauthorized: ${error}`,
+              message: `Unauthorized: ${result.error}`,
               data: { required: GATEWAY_HEADERS },
             },
             id: null,

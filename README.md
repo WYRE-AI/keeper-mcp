@@ -25,50 +25,102 @@ Tool names **pass through unchanged**.
 
 ## Read-only in v1 — deliberate, and load-bearing
 
-Keeper's upstream gates its destructive tools behind an interactive confirmation. In a container there is no TTY, and `internal/ui/confirm.go` collapses to exactly two behaviours:
+### Boundary 1 (the strong one): a read-only KSM application
 
-| Setting | Effect |
+**Provision the Keeper application with non-editable shares.** A KSM application's
+shared-folder grant is read-only unless explicitly made editable
+(`secrets-manager share add --app <APP> --secret <FOLDER_UID>`; the Vault's Application
+Access panel shows `Read-Only` vs `Editable`). With a non-editable grant, every write
+fails at Keeper's own server — regardless of this bridge, its allowlist, batch mode, or
+prompt injection.
+
+This is a **provisioning precondition of the credential contract**, not a nice-to-have.
+The bridge cannot verify it: the Keeper SDK carries `IsEditable` per record, but
+`ksm-mcp` never reads it, so nothing here can detect an over-granted application. Scope
+the application to the narrowest folder set the use case needs, read-only, and treat that
+as the real control.
+
+### Boundary 2: this bridge's allowlist
+
+Keeper's upstream has no read-only mode — verified against the v2.5.0 pin: `serve` has six
+flags and none restrict the surface, `getAvailableTools()` returns a hardcoded 19-element
+slice that consults no config, and `Confirmation.DefaultDeny` is hardcoded false with no
+plumbing. Nothing upstream can un-register a tool.
+
+**On batch mode.** Keeper's own Docker documentation tells you to set
+`KSM_MCP_BATCH_MODE=true`, and this bridge does. What that actually changes:
+
+| Batch mode | Behaviour |
 |---|---|
-| batch/auto-approve **off** | Every confirm-requiring tool hard-errors: *"interactive confirmation via terminal is not supported"*. That includes `get_secret` with `unmask: true` — the integration is useless. |
-| batch/auto-approve **on** | **Every** confirmation is auto-approved, including `delete_secret` and `get_all_secrets_unmasked`. |
+| **off** | `get_field` + `unmask` hard-errors (the single `Confirmer` call site upstream). The other eight confirm-requiring tools return a *successful* `{status: "confirmation_required"}` result pointing at the `ksm_confirm_action` prompt, expecting a two-phase completion. |
+| **on** | Every confirmation is auto-approved, `delete_secret` included. |
 
-Keeper's own Docker documentation tells you to set `KSM_MCP_BATCH_MODE=true`. This bridge does too, because it has to — which means the upstream offers no safe middle setting and **the only possible safety boundary is this bridge's allowlist** (`src/tools.ts`). That is why v1 ships read-only.
+Leaving it off would not buy a confirmation boundary here, because that two-phase flow is
+unreachable through this bridge by construction: it is driven by an MCP *prompt*, and the
+bridge never declares the `prompts` capability — and the tool that completes it,
+`ksm_execute_confirmed_action`, is blocked below. So "off" yields stubs no client here can
+satisfy, not safety. We force it on and put the boundary in `src/tools.ts` instead.
 
-### Served (11)
+**What the allowlist uniquely buys, which a read-only grant does not:** blocking
+`get_all_secrets_unmasked` and `ksm_execute_confirmed_action`. Both are reads-or-worse
+that a read-only grant happily permits.
+
+### Served (9)
 
 | Tool | Conduit tier | Note |
 |---|---|---|
 | `list_secrets` | read | Record metadata only |
 | `search_secrets` | read | Metadata search |
 | `list_folders` | read | Folder metadata |
-| `get_record_type_schema` | read | Static schemas, no vault data |
 | `health_check` | read | |
 | `get_server_version` | read | |
 | `get_secret` | admin | Returns a record; `unmask` honoured |
 | `get_field` | admin | KSM notation query — the narrowest read |
 | `get_totp_code` | admin | Live second factor |
-| `download_file` | admin | Attachment inline; `save_path` **stripped** |
-| `generate_password` | admin | `save_to_secret` + `folder_uid` **stripped** |
+| `generate_password` | admin | Local generation; record-creating args removed |
 
-Conduit classifies credential reads as `admin` (`src/access/tool-classification.ts`), which outranks `write`. A Keeper read is a credential read by definition.
+Conduit classifies credential reads as `admin` (`src/access/tool-classification.ts`), which
+outranks `write`. A Keeper read is a credential read by definition.
 
-### Blocked (8)
+### Blocked (10)
 
-`create_secret`, `update_secret`, `delete_secret`, `create_folder`, `delete_folder`, `upload_file`, `ksm_execute_confirmed_action`, `get_all_secrets_unmasked`
+`create_secret`, `update_secret`, `delete_secret`, `create_folder`, `delete_folder`,
+`upload_file`, `ksm_execute_confirmed_action`, `get_all_secrets_unmasked`,
+`get_record_type_schema`, `download_file`
 
-Two of those stay blocked **even in a write-enabled v2**:
+Four are worth explaining:
 
-- **`get_all_secrets_unmasked`** — one call that dumps every secret in the application's scope, unmasked, into the model's context.
-- **`ksm_execute_confirmed_action`** — the upstream's confirmation-bypass executor.
+- **`ksm_execute_confirmed_action`** — not a peer of the others but the keystone. It takes
+  `original_tool_name` plus a `user_decision` boolean **the caller supplies**, with no
+  nonce and no correlation to any prompt, then dispatches straight into the confirmed
+  executors. Allowing it would collapse every other rule here into one name. Blocked
+  permanently.
+- **`get_all_secrets_unmasked`** — one call that returns every secret in the application's
+  scope, unmasked, into the model's context. Blocked permanently.
+- **`get_record_type_schema`** — non-functional upstream at v2.5.0:
+  `LoadRecordTemplates()` has no callers and the package has no `init()`, so every call
+  returns "record templates not loaded".
+- **`download_file`** — cannot work over MCP. Upstream's `DownloadFile(uid, fileUID,
+  savePath)` returns only an `error` and writes bytes to a server-side path; the handler
+  returns `{uid, file_uid, path, message}`, never the file. Honouring `save_path` would let
+  a tenant write attacker-chosen paths into a container filesystem shared with every other
+  tenant's child, and removing it leaves nowhere to write.
 
-### Argument stripping
+### Argument policy: allowlist, not blocklist
 
-Stripped from both the advertised `inputSchema` and the inbound `tools/call` arguments, so a client working from a stale or ignored schema still cannot reach a write path:
+Each served tool declares the exact arguments it accepts (`allowArgs` in `src/tools.ts`),
+enforced on both the advertised `inputSchema` and the inbound `tools/call`. A client
+working from a stale or ignored schema therefore cannot reach a write path by passing an
+argument anyway.
 
-- `generate_password`: `save_to_secret`, `folder_uid` — these turn a local utility into a record **create**.
-- `download_file`: `save_path` — would write tenant-controlled paths into a container filesystem shared with every other tenant's child.
+The default matters more than the current entries: when an upstream bump adds a parameter
+to an already-served tool, it **fails closed** — it vanishes from the surface until
+someone reviews it into the table — rather than passing through silently. Today the only
+removals are `generate_password`'s `save_to_secret` and `folder_uid`, which would turn a
+local utility into a record create.
 
-Enabling writes is a reviewed, versioned change to the table in `src/tools.ts` plus the matching `VENDOR_TOOL_CONFIG` rows in conduit. Not a config flip, not an env var.
+Enabling writes is a reviewed, versioned change to `src/tools.ts` plus the matching
+`VENDOR_TOOL_CONFIG` rows in conduit. Not a config flip, not an env var.
 
 ## Credential contract
 
@@ -79,6 +131,10 @@ The gateway forwards this header on every `/mcp` request. **conduit's vendor-con
 | `X-Keeper-Config-Base64` | `KSM_CONFIG_BASE64` | yes |
 
 The value is the base64 **device configuration** from Keeper Vault → Secrets Manager → *your application* → **Devices** → *Add Device* (it starts `ewog...`).
+
+> **Precondition:** the application this device belongs to must hold **read-only
+> (non-editable) shares**. See [Boundary 1](#boundary-1-the-strong-one-a-read-only-ksm-application)
+> — it is the strongest control in the system and the bridge cannot verify it for you.
 
 **Validity rule:** standard base64 that decodes to a flat JSON object of string values containing `clientId`, `privateKey` and `appKey`. `hostname` is optional — verified against upstream `internal/ksm/client.go` `InitializeWithConfig`, which requires exactly those three. Anything else → **HTTP 401** with a JSON-RPC error body that never echoes the supplied value back.
 
@@ -92,17 +148,13 @@ argv: ["serve", "--batch"]
 
 `KSM_MCP_PROFILE` is deliberately **not** set: with `KSM_CONFIG_BASE64` present, upstream builds an in-memory profile and never touches the on-disk profile store, which is what keeps tenants from sharing state through the filesystem.
 
-## Blast radius lives in Keeper, not here
-
-This server can never reach beyond what the KSM **application** itself can see. Scope is set by that application's Folder Access and Record Permissions in the Keeper vault. Grant the narrowest folder set and read-only record permissions that the use case needs — that, not this bridge, is the real control.
-
 ## Configuration
 
 | Env var | Default | Notes |
 |---|---|---|
 | `PORT` | `8080` | Public listen port. |
 | `KSM_MCP_BIN` | `/usr/local/bin/ksm-mcp` | Upstream binary the bridge spawns. |
-| `CHILD_HOME` | `/tmp/ksm-mcp-home` | Writable `HOME` for children. |
+| `CHILD_HOME` | `/tmp/ksm-mcp-home` | Root under which each tenant gets its **own** `HOME` subdirectory, created at spawn. |
 | `IDLE_EVICT_MS` | `900000` | Idle tenant timeout (15 min). Shorter than nutanix-mcp's 60 min on purpose: the Go child restarts in milliseconds, and every minute one stays open is a minute an authenticated KSM session sits in memory. |
 | `SPAWN_TIMEOUT_MS` | `30000` | Max wait for a child to answer the MCP handshake. |
 
@@ -125,9 +177,10 @@ The test suite covers the allowlist policy, the credential contract, and the 401
 ## Bumping the upstream pin
 
 1. Change `KSM_MCP_REF` in the `Dockerfile`.
-2. Diff the upstream, **paying particular attention to `internal/mcp/tools.go`**. New upstream tools default to blocked (they are simply absent from `ALLOWED_TOOLS`) — but they must be triaged into `src/tools.ts` explicitly, and the coverage test in `src/__tests__/tools.test.ts` asserts every upstream tool is accounted for as either allowed or blocked. Update that fixture list as part of the bump.
-3. Re-run the build; both build-time smoke tests must pass.
-4. Cut a release, then re-pin the digest in conduit's `azure/vendor-fleet.conduit-prod.bicepparam`.
+2. Rebuild. `scripts/check-upstream-tools.mjs` runs in the Docker build, re-derives the tool surface from the pinned Go source, and **fails the build** on any drift — a new tool, a renamed one, or a new argument on an already-served tool. This is enforcement, not a checklist item.
+3. Triage whatever it reports into `src/tools.ts` and `src/__tests__/fixtures.ts`. New tools are default-denied by the allowlist, but they still need an explicit decision recorded.
+4. Re-run the build; both build-time smoke tests and the drift check must pass.
+5. Cut a release, then re-pin the digest in conduit's `azure/vendor-fleet.conduit-prod.bicepparam`.
 
 Never track `main`, and never pull `keeper/keeper-mcp-server:latest` — the pin is a reviewed git tag we build ourselves.
 

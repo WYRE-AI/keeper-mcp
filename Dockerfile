@@ -30,8 +30,8 @@ ENV KSM_MCP_REF=v2.5.0
 WORKDIR /build
 RUN apk add --no-cache git ca-certificates
 RUN git clone --depth=1 --branch "${KSM_MCP_REF}" \
-      https://github.com/Keeper-Security/keeper-mcp-golang-docker.git /build/ksm-mcp
-WORKDIR /build/ksm-mcp
+      https://github.com/Keeper-Security/keeper-mcp-golang-docker.git /src/ksm-mcp
+WORKDIR /src/ksm-mcp
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -ldflags="-w -s -extldflags '-static' -X main.Version=${KSM_MCP_REF}" \
       -a -installsuffix cgo \
@@ -45,10 +45,19 @@ RUN /out/ksm-mcp --help > /dev/null
 # ---- Stage 2: build the Node bridge ----
 FROM node:22-bookworm-slim AS bridge-build
 WORKDIR /app
-COPY package.json package-lock.json* tsconfig.json ./
+COPY package.json package-lock.json* tsconfig.json tsconfig.lint.json ./
 RUN npm ci --no-audit --no-fund
 COPY src ./src
-RUN npm run build && npm prune --omit=dev
+COPY scripts ./scripts
+
+# Fail the build if the pinned upstream's tool surface has drifted from what
+# the policy in src/tools.ts was written against. New TOOLS are default-denied
+# by the allowlist, but a new ARGUMENT on an already-served tool would not be
+# caught by anything else — so the pin bump has to be reviewed, not just merged.
+COPY --from=upstream /src/ksm-mcp/internal/mcp/tools.go /tmp/upstream/internal/mcp/tools.go
+RUN node scripts/check-upstream-tools.mjs /tmp/upstream
+
+RUN npm run lint && npm run build && npm prune --omit=dev
 
 # ---- Stage 3: runtime image ----
 FROM node:22-bookworm-slim AS runtime
@@ -72,6 +81,9 @@ RUN set -eu; \
 # The child needs a writable HOME: upstream resolves ~/.keeper/ksm-mcp when its
 # in-memory profile path is ever missed. node:22-bookworm-slim ships a `node`
 # user (uid 1000); give it one it owns rather than running as root.
+# Each tenant's child gets its own HOME *subdirectory* under this root (created
+# at spawn, see src/pool.ts) — upstream's profile-store fallback must never be a
+# shared location.
 RUN mkdir -p /tmp/ksm-mcp-home && chown -R node:node /tmp/ksm-mcp-home
 
 WORKDIR /app

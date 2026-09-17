@@ -19,20 +19,17 @@
  * one open as long — and every minute it stays open is a minute an authenticated
  * KSM session sits in memory. Short window, cheap respawn: take the short window.
  */
+import { mkdir } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/client";
 import { StdioClientTransport, getDefaultEnvironment } from "@modelcontextprotocol/client/stdio";
-import {
-  CHILD_ARGS,
-  credentialsToChildEnv,
-  hashCredentials,
-  type KeeperCredentials,
-} from "./credentials.js";
+import { CHILD_ARGS, childEnv, childHomeFor } from "./child.js";
+import { hashCredentials, type KeeperCredentials } from "./credentials.js";
 
 export interface ChildPoolOptions {
   /** Path to the upstream `ksm-mcp` binary the bridge spawns. */
   upstreamBin?: string;
-  /** Writable HOME for the child (upstream resolves its config dir under it). */
-  childHome?: string;
+  /** Base dir under which each tenant gets its own HOME subdirectory. */
+  childHomeRoot?: string;
   /** Idle tenant timeout before a child is evicted (ms). */
   idleEvictMs?: number;
   /** How long to wait for a spawned child to answer the MCP handshake (ms). */
@@ -43,20 +40,24 @@ interface TenantChild {
   client: Client;
   connectPromise: Promise<void>;
   lastUsed: number;
-  credHash: string;
 }
+
+const closeQuietly = (client: Client): Promise<void> =>
+  client.close().catch(() => {
+    /* a child that is already gone is the outcome we wanted */
+  });
 
 export class ChildPool {
   private readonly children = new Map<string, TenantChild>();
   private readonly sweeper: NodeJS.Timeout;
   private readonly upstreamBin: string;
-  private readonly childHome: string;
+  private readonly childHomeRoot: string;
   private readonly idleEvictMs: number;
   private readonly spawnTimeoutMs: number;
 
   constructor(options: ChildPoolOptions = {}) {
     this.upstreamBin = options.upstreamBin ?? process.env.KSM_MCP_BIN ?? "/usr/local/bin/ksm-mcp";
-    this.childHome = options.childHome ?? process.env.CHILD_HOME ?? "/tmp/ksm-mcp-home";
+    this.childHomeRoot = options.childHomeRoot ?? process.env.CHILD_HOME ?? "/tmp/ksm-mcp-home";
     this.idleEvictMs = options.idleEvictMs ?? Number(process.env.IDLE_EVICT_MS ?? 15 * 60 * 1000);
     this.spawnTimeoutMs = options.spawnTimeoutMs ?? Number(process.env.SPAWN_TIMEOUT_MS ?? 30_000);
 
@@ -71,10 +72,9 @@ export class ChildPool {
   /** Get (or lazily spawn) the connected MCP client session for a tenant. */
   async getSession(creds: KeeperCredentials): Promise<Client> {
     const credHash = hashCredentials(creds);
-    let child = this.children.get(credHash);
-    if (!child) {
-      child = this.spawn(creds, credHash);
-    }
+    const child = this.children.get(credHash) ?? this.spawn(creds, credHash);
+    // Stamped before the await so a slow spawn cannot be evicted mid-flight,
+    // and again after so the idle clock starts when the caller actually got it.
     child.lastUsed = Date.now();
     await child.connectPromise;
     child.lastUsed = Date.now();
@@ -82,62 +82,53 @@ export class ChildPool {
   }
 
   private spawn(creds: KeeperCredentials, credHash: string): TenantChild {
-    const transport = new StdioClientTransport({
-      command: this.upstreamBin,
-      args: [...CHILD_ARGS],
-      env: {
-        ...getDefaultEnvironment(),
-        ...credentialsToChildEnv(creds),
-        // Upstream falls back to ~/.keeper/ksm-mcp for its profile store if it
-        // ever misses the in-memory path. Point HOME at a writable scratch dir
-        // so that fallback cannot land in a location shared across tenants.
-        HOME: this.childHome,
-      },
-      stderr: "pipe",
-    });
-    // Tag child stderr with the tenant hash for debuggability. The hash is a
-    // digest of the config, so this is safe to write to logs; the config is not.
-    transport.stderr?.on("data", (chunk: Buffer) => {
-      process.stderr.write(`[ksm:${credHash}] ${chunk}`);
-    });
-
     const client = new Client({ name: "keeper-mcp-bridge", version: "1.0.0" });
+    const home = childHomeFor(this.childHomeRoot, credHash);
 
-    const child: TenantChild = {
-      client,
-      connectPromise: Promise.resolve(),
-      lastUsed: Date.now(),
-      credHash,
-    };
-    // Register BEFORE awaiting so concurrent requests share this spawn.
-    this.children.set(credHash, child);
-
-    child.connectPromise = (async () => {
+    const connectPromise = (async () => {
       try {
+        await mkdir(home, { recursive: true, mode: 0o700 });
+
+        const transport = new StdioClientTransport({
+          command: this.upstreamBin,
+          args: [...CHILD_ARGS],
+          // getDefaultEnvironment() is a fixed six-name whitelist (HOME,
+          // LOGNAME, PATH, SHELL, TERM, USER), so no KSM_MCP_* from the
+          // bridge's own environment can reach a child.
+          env: { ...getDefaultEnvironment(), ...childEnv(creds, home) },
+          stderr: "pipe",
+        });
+        // Tag child stderr with the tenant hash for debuggability. The hash is a
+        // digest of the config, so this is safe to log; the config is not.
+        transport.stderr?.on("data", (chunk: Buffer) => {
+          process.stderr.write(`[ksm:${credHash}] ${chunk}`);
+        });
+
         await client.connect(transport, { timeout: this.spawnTimeoutMs });
+
         // Child died later (crash, OOM, eviction race): drop the pool entry so
         // the next request respawns instead of hitting a dead session.
         client.onclose = () => {
-          if (this.children.get(credHash) === child) {
+          if (this.children.get(credHash)?.client === client) {
             this.children.delete(credHash);
             process.stderr.write(`[ksm:${credHash}] child session closed\n`);
           }
         };
       } catch (err) {
         // Spawn/handshake failure — most commonly a missing binary (ENOENT) or
-        // a config the upstream rejects. Scope it to this tenant: remove the
-        // entry, kill the child, surface the real error to the caller.
+        // a config Keeper rejects at the startup connection test. Scope it to
+        // this tenant: remove the entry, kill the child, surface the real error.
         this.children.delete(credHash);
-        try {
-          await client.close();
-        } catch {
-          /* ignore */
-        }
+        await closeQuietly(client);
         const message = err instanceof Error ? err.message : String(err);
         throw new Error(`Failed to start Keeper MCP child process: ${message}`);
       }
     })();
 
+    const child: TenantChild = { client, connectPromise, lastUsed: Date.now() };
+    // Registered synchronously — the async IIFE above runs only to its first
+    // await, so nothing can observe the map before this set().
+    this.children.set(credHash, child);
     return child;
   }
 
@@ -147,20 +138,14 @@ export class ChildPool {
       if (now - child.lastUsed > this.idleEvictMs) {
         process.stderr.write(`[ksm:${credHash}] evicting idle child after ${this.idleEvictMs}ms\n`);
         this.children.delete(credHash);
-        child.client.close().catch(() => {
-          /* ignore */
-        });
+        void closeQuietly(child.client);
       }
     }
   }
 
   async shutdown(): Promise<void> {
     clearInterval(this.sweeper);
-    const closing = [...this.children.values()].map((child) =>
-      child.client.close().catch(() => {
-        /* ignore */
-      }),
-    );
+    const closing = [...this.children.values()].map((child) => closeQuietly(child.client));
     this.children.clear();
     await Promise.all(closing);
   }

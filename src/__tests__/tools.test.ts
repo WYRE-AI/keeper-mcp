@@ -1,107 +1,99 @@
 /**
  * The read-only tool policy. These tests are the executable form of the
  * security argument in src/tools.ts: the upstream child auto-approves every
- * confirmation in batch mode, so the allowlist here is the ONLY boundary
- * between a model and a tenant's vault.
+ * confirmation in batch mode, so this allowlist is the last boundary inside
+ * our own process between a model and a tenant's vault.
  */
 import { describe, expect, it } from "vitest";
 import {
   ALLOWED_TOOLS,
+  ALLOWED_TOOL_NAMES,
   BLOCKED_TOOLS,
+  UPSTREAM_TOOLS,
   filterTools,
   isAllowed,
+  pickToolArgs,
   refusalMessage,
-  stripToolArgs,
 } from "../tools.js";
-
-/** The 19 tools upstream v2.5.0 advertises (internal/mcp/tools.go). */
-const UPSTREAM_TOOLS = [
-  "list_secrets",
-  "get_secret",
-  "search_secrets",
-  "get_field",
-  "generate_password",
-  "get_totp_code",
-  "create_secret",
-  "update_secret",
-  "delete_secret",
-  "upload_file",
-  "download_file",
-  "list_folders",
-  "create_folder",
-  "health_check",
-  "get_server_version",
-  "delete_folder",
-  "ksm_execute_confirmed_action",
-  "get_all_secrets_unmasked",
-  "get_record_type_schema",
-].map((name) => ({
-  name,
-  inputSchema: {
-    type: "object" as const,
-    properties: {
-      uid: { type: "string" },
-      save_path: { type: "string" },
-      save_to_secret: { type: "string" },
-      folder_uid: { type: "string" },
-    },
-    required: ["uid"],
-  },
-}));
+import { UPSTREAM_TOOL_SCHEMAS, upstreamToolList } from "./fixtures.js";
 
 describe("allowlist coverage", () => {
-  it("accounts for every upstream tool as either allowed or blocked", () => {
-    const unaccounted = UPSTREAM_TOOLS.map((t) => t.name).filter(
-      (name) => !Object.hasOwn(ALLOWED_TOOLS, name) && !Object.hasOwn(BLOCKED_TOOLS, name),
+  it("serves exactly the 9 read tools", () => {
+    expect(ALLOWED_TOOL_NAMES).toEqual([
+      "generate_password",
+      "get_field",
+      "get_secret",
+      "get_server_version",
+      "get_totp_code",
+      "health_check",
+      "list_folders",
+      "list_secrets",
+      "search_secrets",
+    ]);
+  });
+
+  it("only ever allows tools the pinned upstream actually has", () => {
+    const phantom = ALLOWED_TOOL_NAMES.filter(
+      (name) => !(UPSTREAM_TOOLS as readonly string[]).includes(name),
     );
-    expect(unaccounted).toEqual([]);
+    expect(phantom).toEqual([]);
   });
 
-  it("serves exactly the 11 read tools", () => {
-    expect(Object.keys(ALLOWED_TOOLS).sort()).toEqual(
-      [
-        "download_file",
-        "generate_password",
-        "get_field",
-        "get_record_type_schema",
-        "get_secret",
-        "get_server_version",
-        "get_totp_code",
-        "health_check",
-        "list_folders",
-        "list_secrets",
-        "search_secrets",
-      ].sort(),
-    );
+  it("blocks everything upstream offers that is not allowed", () => {
+    expect(BLOCKED_TOOLS).toEqual([
+      "create_folder",
+      "create_secret",
+      "delete_folder",
+      "delete_secret",
+      "download_file",
+      "get_all_secrets_unmasked",
+      "get_record_type_schema",
+      "ksm_execute_confirmed_action",
+      "update_secret",
+      "upload_file",
+    ]);
   });
 
-  it("allows and blocks disjoint sets", () => {
-    const overlap = Object.keys(ALLOWED_TOOLS).filter((n) => Object.hasOwn(BLOCKED_TOOLS, n));
-    expect(overlap).toEqual([]);
+  it("accounts for every upstream tool exactly once", () => {
+    expect([...ALLOWED_TOOL_NAMES, ...BLOCKED_TOOLS].sort()).toEqual([...UPSTREAM_TOOLS].sort());
   });
 
-  it.each([
-    "create_secret",
-    "update_secret",
-    "delete_secret",
-    "create_folder",
-    "delete_folder",
-    "upload_file",
-    "ksm_execute_confirmed_action",
-    "get_all_secrets_unmasked",
-  ])("blocks %s", (name) => {
-    expect(isAllowed(name)).toBe(false);
+  it("stays in step with the upstream schema fixture", () => {
+    expect(Object.keys(UPSTREAM_TOOL_SCHEMAS).sort()).toEqual([...UPSTREAM_TOOLS].sort());
+  });
+});
+
+describe("the self-approval trampoline stays shut", () => {
+  // A name allowlist has exactly one structural failure mode: an allowed tool
+  // whose ARGUMENT names another tool. ksm_execute_confirmed_action is that
+  // tool upstream — it takes original_tool_name plus a caller-supplied
+  // user_decision — and it would collapse every other rule in this file into
+  // one allowed name. This test generalises the rule to future upstream
+  // additions rather than just re-asserting the one known case.
+  it("blocks ksm_execute_confirmed_action", () => {
+    expect(isAllowed("ksm_execute_confirmed_action")).toBe(false);
+  });
+
+  it("serves no tool that accepts another tool's name or an approval flag", () => {
+    const upstreamNames = new Set<string>(UPSTREAM_TOOLS);
+    const offenders: string[] = [];
+    for (const name of ALLOWED_TOOL_NAMES) {
+      for (const arg of ALLOWED_TOOLS[name as keyof typeof ALLOWED_TOOLS].allowArgs) {
+        if (upstreamNames.has(arg) || /tool_name|tool_args|decision|confirm/i.test(arg)) {
+          offenders.push(`${name}.${arg}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
 describe("filterTools", () => {
-  const filtered = filterTools(UPSTREAM_TOOLS);
+  const filtered = filterTools(upstreamToolList());
 
   it("drops every blocked tool from tools/list", () => {
     const names = filtered.map((t) => t.name);
-    expect(names).not.toContain("delete_secret");
-    expect(names).not.toContain("get_all_secrets_unmasked");
-    expect(names).toHaveLength(11);
+    expect(names).toEqual([...ALLOWED_TOOL_NAMES]);
   });
 
   it("returns a deterministic (sorted) order", () => {
@@ -109,65 +101,92 @@ describe("filterTools", () => {
     expect(names).toEqual([...names].sort());
   });
 
-  it("strips write-capable args from generate_password's advertised schema", () => {
+  it("narrows each advertised schema to its allowed arguments", () => {
+    for (const tool of filtered) {
+      const allowed = ALLOWED_TOOLS[tool.name as keyof typeof ALLOWED_TOOLS].allowArgs;
+      expect(Object.keys(tool.inputSchema.properties).sort()).toEqual(
+        [...allowed].filter((a) => UPSTREAM_TOOL_SCHEMAS[tool.name]!.properties.includes(a)).sort(),
+      );
+    }
+  });
+
+  it("removes generate_password's record-creating arguments", () => {
     const tool = filtered.find((t) => t.name === "generate_password")!;
     expect(tool.inputSchema.properties).not.toHaveProperty("save_to_secret");
     expect(tool.inputSchema.properties).not.toHaveProperty("folder_uid");
+    expect(tool.inputSchema.properties).toHaveProperty("length");
   });
 
-  it("strips save_path from download_file's advertised schema", () => {
-    const tool = filtered.find((t) => t.name === "download_file")!;
-    expect(tool.inputSchema.properties).not.toHaveProperty("save_path");
-  });
-
-  it("leaves non-stripped tools' schemas untouched", () => {
-    const tool = filtered.find((t) => t.name === "get_secret")!;
-    expect(tool.inputSchema.properties).toHaveProperty("save_path");
+  it("drops a newly-added upstream argument by default (fail closed)", () => {
+    const withNewArg = upstreamToolList().map((tool) =>
+      tool.name === "get_secret"
+        ? {
+            ...tool,
+            inputSchema: {
+              ...tool.inputSchema,
+              properties: { ...tool.inputSchema.properties, write_back: { type: "string" } },
+            },
+          }
+        : tool,
+    );
+    const got = filterTools(withNewArg).find((t) => t.name === "get_secret")!;
+    expect(got.inputSchema.properties).not.toHaveProperty("write_back");
   });
 
   it("does not mutate the input tools", () => {
-    expect(UPSTREAM_TOOLS.find((t) => t.name === "download_file")!.inputSchema.properties).toHaveProperty(
-      "save_path",
+    const input = upstreamToolList();
+    filterTools(input);
+    expect(input.find((t) => t.name === "generate_password")!.inputSchema.properties).toHaveProperty(
+      "save_to_secret",
     );
   });
 });
 
-describe("stripToolArgs", () => {
-  it("removes stripped args a client sent anyway (stale or ignored schema)", () => {
+describe("pickToolArgs", () => {
+  it("removes disallowed args a client sent anyway (stale or ignored schema)", () => {
     expect(
-      stripToolArgs("generate_password", { length: 32, save_to_secret: "pwned", folder_uid: "f1" }),
+      pickToolArgs("generate_password", { length: 32, save_to_secret: "pwned", folder_uid: "f1" }),
     ).toEqual({ length: 32 });
   });
 
-  it("removes save_path from download_file calls", () => {
-    expect(stripToolArgs("download_file", { uid: "u1", save_path: "/etc/cron.d/x" })).toEqual({
+  it("passes through every allowed arg", () => {
+    expect(pickToolArgs("get_secret", { uid: "u1", unmask: true, fields: ["password"] })).toEqual({
       uid: "u1",
+      unmask: true,
+      fields: ["password"],
     });
   });
 
-  it("passes through args for tools with no strip rule", () => {
-    expect(stripToolArgs("get_secret", { uid: "u1", unmask: true })).toEqual({
+  it("drops an argument upstream does not have and we never allowed", () => {
+    expect(pickToolArgs("get_secret", { uid: "u1", save_path: "/etc/cron.d/x" })).toEqual({
       uid: "u1",
-      unmask: true,
     });
   });
 
   it("tolerates undefined args", () => {
-    expect(stripToolArgs("download_file", undefined)).toBeUndefined();
+    expect(pickToolArgs("list_folders", undefined)).toBeUndefined();
   });
 });
 
 describe("refusalMessage", () => {
-  it("explains WHY a blocked tool is refused", () => {
-    expect(refusalMessage("get_all_secrets_unmasked")).toContain("dumps every secret");
+  it("explains WHY the bulk export is refused", () => {
+    expect(refusalMessage("get_all_secrets_unmasked")).toContain("every secret");
   });
 
-  it("lists the available tools for an unknown tool name", () => {
-    const message = refusalMessage("not_a_real_tool");
-    expect(message).toContain("list_secrets");
+  it("explains that the trampoline would bypass every other rule", () => {
+    expect(refusalMessage("ksm_execute_confirmed_action")).toContain("bypass");
   });
 
-  it("never leaks a blocked tool as merely unknown", () => {
-    expect(refusalMessage("delete_secret")).toContain("read-only");
+  it("says a tool is broken upstream rather than implying we chose to withhold it", () => {
+    expect(refusalMessage("get_record_type_schema")).toContain("non-functional");
+    expect(refusalMessage("download_file")).toContain("never returns its bytes");
+  });
+
+  it("always names the read-only posture and the available tools", () => {
+    for (const name of [...BLOCKED_TOOLS, "not_a_real_tool"]) {
+      const message = refusalMessage(name);
+      expect(message).toContain("read-only");
+      expect(message).toContain("list_secrets");
+    }
   });
 });

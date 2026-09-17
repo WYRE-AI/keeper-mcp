@@ -21,21 +21,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the config decodes to a usable KSM device configuration (`clientId`,
   `privateKey`, `appKey`) before any child is spawned. No fall-through to
   environment credentials.
-- **Read-only v1 tool policy** (`src/tools.ts`): 11 read tools served, 8 write
-  and bulk-export tools blocked, with write-capable arguments stripped from both
-  the advertised schemas and inbound calls. Keeper's upstream auto-approves every
-  confirmation in batch mode — which a container must use, having no TTY — so
-  this allowlist is the only safety boundary in the path.
+- **Read-only v1 tool policy** (`src/tools.ts`): 9 read tools served, 10 blocked,
+  default-deny in both dimensions — unlisted tools are refused, and each served
+  tool declares the exact arguments it accepts, so a new upstream argument fails
+  closed rather than passing through.
 - `GET /health` reporting mode, served tool count and live tenant count without
   spawning a child.
-- Two build-time Docker smoke tests: the upstream binary runs, and it still reads
+- `scripts/check-upstream-tools.mjs`, run during the Docker build: re-derives the
+  upstream tool surface from the pinned Go source and fails the build on any
+  drift (new tool, renamed tool, or new argument on a served tool). The pin bump
+  is enforced rather than left to a checklist.
+- Build-time smoke tests: the upstream binary runs, and it still reads
   `KSM_CONFIG_BASE64`.
 
 ### Security
 
-- `get_all_secrets_unmasked` and `ksm_execute_confirmed_action` are blocked and
-  remain blocked even in a future write-enabled release.
+- `get_all_secrets_unmasked` and `ksm_execute_confirmed_action` are blocked
+  permanently, including in any future write-enabled release. The latter is the
+  keystone: it executes an arbitrary named tool with a `user_decision` flag the
+  *caller* supplies, so allowing it would collapse every other rule into one
+  name.
+- `get_record_type_schema` and `download_file` are blocked because they are
+  broken upstream at this pin, not merely out of scope — record templates are
+  never loaded, and `download_file` writes to a server-side path and never
+  returns the bytes.
+- Each tenant's child gets its own `HOME` subdirectory, so upstream's on-disk
+  profile-store fallback can never become a shared surface.
+- The `prompts` capability is deliberately never declared, which makes upstream's
+  entire prompt surface — including the `ksm_confirm_action` confirmation flow —
+  unreachable through this bridge by construction.
 - Idle children are evicted after 15 minutes, shorter than the fleet's 60-minute
   default, to bound how long an authenticated KSM session lives in memory.
+  `tools/list` is memoized process-wide so merely browsing the surface never
+  spawns a child or opens a KSM session.
 - Credential-validation errors describe the shape of the problem only; they never
   echo any part of the supplied config.
+
+### Notes
+
+- The strongest control for this vendor is **not** in this repo: a KSM
+  application whose shares are non-editable rejects every write at Keeper's own
+  server. That is a documented provisioning precondition of the credential
+  contract — the bridge cannot verify it, because `ksm-mcp` never surfaces the
+  SDK's per-record `IsEditable`.
