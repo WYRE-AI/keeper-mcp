@@ -99,7 +99,14 @@ export const ALLOWED_TOOLS = {
   // --- metadata only: no credential material crosses the wire ---
   /** Record metadata (uid/title/type). Values are not included. */
   list_secrets: { allowArgs: ["folder_uid", "folder_uids"] },
-  /** Metadata search over title/notes/fields. */
+  /**
+   * Metadata-shaped RESULT ({uid,title,type,folder}), but the MATCH runs
+   * case-insensitive substring over the record's notes and the values of its
+   * login/url/hostname/address fields. A caller never receives a secret but
+   * can test whether one contains a given substring — a confirmation oracle
+   * (CWE-200). Conduit classifies it `admin` for that reason; the matching is
+   * inside Keeper's binary and cannot be narrowed from here.
+   */
   search_secrets: { allowArgs: ["query"] },
   /** Folder metadata within the application's scope. */
   list_folders: { allowArgs: [] },

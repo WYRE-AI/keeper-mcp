@@ -36,6 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- `search_secrets` is documented and classified as an **admin**-tier credential
+  read, not metadata. Its result is metadata-shaped (`{uid,title,type,folder}`)
+  but its match runs case-insensitive substring over the record's notes and the
+  values of its `login`/`url`/`hostname`/`address` fields, so a caller can test
+  whether a secret contains a given substring without receiving it — a
+  confirmation oracle (CWE-200). The matching is inside Keeper's binary and
+  cannot be narrowed from the bridge; the server `instructions` now say so
+  explicitly so a model does not treat a hit as a neutral metadata result.
+
 - `get_all_secrets_unmasked` and `ksm_execute_confirmed_action` are blocked
   permanently, including in any future write-enabled release. The latter is the
   keystone: it executes an arbitrary named tool with a `user_decision` flag the

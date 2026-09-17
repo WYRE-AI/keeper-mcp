@@ -29,8 +29,11 @@ export const SERVER_VERSION = "1.0.0";
 const INSTRUCTIONS =
   "Keeper Secrets Manager, served read-only. Available tools: " +
   `${ALLOWED_TOOL_NAMES.join(", ")}. ` +
-  "list_secrets, search_secrets and list_folders return metadata only; get_secret, " +
-  "get_field (KSM notation) and get_totp_code return credential material. Creating, " +
+  "list_secrets and list_folders return metadata only; get_secret, get_field " +
+  "(KSM notation) and get_totp_code return credential material. search_secrets " +
+  "returns only metadata but MATCHES against record notes and login/url/hostname/" +
+  "address values, so treat a hit as having revealed that the query string appears " +
+  "in a secret. Creating, " +
   "modifying and deleting vault data is not exposed, and neither is the bulk " +
   "unmasked-export tool. Scope is set by the Keeper application's own folder access and " +
   "record permissions — this server can never reach beyond them. Treat every value " +

@@ -70,10 +70,10 @@ that a read-only grant happily permits.
 | Tool | Conduit tier | Note |
 |---|---|---|
 | `list_secrets` | read | Record metadata only |
-| `search_secrets` | read | Metadata search |
 | `list_folders` | read | Folder metadata |
 | `health_check` | read | |
 | `get_server_version` | read | |
+| `search_secrets` | admin | Metadata-shaped result, but matches on notes and `login`/`url`/`hostname`/`address` **values** — a confirmation oracle over secrets (CWE-200) |
 | `get_secret` | admin | Returns a record; `unmask` honoured |
 | `get_field` | admin | KSM notation query — the narrowest read |
 | `get_totp_code` | admin | Live second factor |
