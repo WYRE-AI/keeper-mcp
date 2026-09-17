@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `package.json`/`package-lock.json` still had the pre-org-transfer
+  `@wyre-technology/keeper-mcp` scope and `repository.url`. The Release
+  workflow started failing (`SemanticReleaseError: The git repository URL
+  mismatches the GitHub URL` — `@semantic-release/github`'s
+  `verifyConditions` fails closed on a mismatch between the configured
+  `repositoryUrl` and the GitHub API context it authenticates against).
+  Repointed both to `WYRE-AI`; safe since this package is `private: true`
+  and never actually published. `server.json`, the `ghcr.io` image refs and
+  reusable-workflow source in `.github/workflows/release.yml`, and
+  `add-to-project.yml`'s `project-url` still reference `wyre-technology`
+  and need a separate, more careful pass — not fixed here since none of
+  them are what's currently breaking releases.
+
 ### Added
 
 - Initial multitenant Streamable HTTP bridge over Keeper's Secrets Manager MCP
