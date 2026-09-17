@@ -1,0 +1,58 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.wyre-technology/keeper-mcp",
+  "title": "Keeper Secrets Manager",
+  "description": "Read-only multitenant Streamable HTTP bridge over Keeper Secrets Manager's MCP server.",
+  "repository": {
+    "url": "https://github.com/wyre-technology/keeper-mcp",
+    "source": "github"
+  },
+  "version": "0.0.0",
+  "websiteUrl": "https://github.com/wyre-technology/keeper-mcp",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/wyre-technology/keeper-mcp:0.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "PORT",
+          "description": "Public listen port for the bridge (POST /mcp, GET /health)",
+          "isRequired": false,
+          "default": "8080",
+          "format": "string"
+        },
+        {
+          "name": "KSM_MCP_BIN",
+          "description": "Path to the upstream ksm-mcp binary the bridge spawns per tenant",
+          "isRequired": false,
+          "default": "/usr/local/bin/ksm-mcp",
+          "format": "string"
+        },
+        {
+          "name": "CHILD_HOME",
+          "description": "Writable HOME for upstream child processes",
+          "isRequired": false,
+          "default": "/tmp/ksm-mcp-home",
+          "format": "string"
+        },
+        {
+          "name": "IDLE_EVICT_MS",
+          "description": "Idle tenant timeout before an upstream child is evicted (ms)",
+          "isRequired": false,
+          "default": "900000",
+          "format": "string"
+        },
+        {
+          "name": "SPAWN_TIMEOUT_MS",
+          "description": "How long to wait for a spawned child to answer the MCP handshake (ms)",
+          "isRequired": false,
+          "default": "30000",
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
