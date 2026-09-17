@@ -1,5 +1,5 @@
 {
-  "name": "@wyre-technology/keeper-mcp",
+  "name": "@wyre-ai/keeper-mcp",
   "version": "0.0.0",
   "description": "Multitenant Streamable HTTP bridge over Keeper's Secrets Manager MCP server (stdio), read-only",
   "private": true,
@@ -15,7 +15,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/wyre-technology/keeper-mcp.git"
+    "url": "git+https://github.com/WYRE-AI/keeper-mcp.git"
   },
   "author": "WYRE Technology",
   "license": "Apache-2.0",
