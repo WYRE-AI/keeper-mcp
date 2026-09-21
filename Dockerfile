@@ -91,10 +91,10 @@ COPY --from=bridge-build /app/node_modules ./node_modules
 COPY --from=bridge-build /app/dist ./dist
 COPY --from=bridge-build /app/package.json ./package.json
 
-LABEL org.opencontainers.image.source="https://github.com/wyre-technology/keeper-mcp" \
+LABEL org.opencontainers.image.source="https://github.com/WYRE-AI/keeper-mcp" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.description="Read-only multitenant Streamable HTTP bridge over Keeper Secrets Manager's MCP server" \
-      io.modelcontextprotocol.server.name="io.github.wyre-technology/keeper-mcp"
+      io.modelcontextprotocol.server.name="io.github.WYRE-AI/keeper-mcp"
 
 USER node
 EXPOSE 8080
