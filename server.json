@@ -1,18 +1,18 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.wyre-technology/keeper-mcp",
+  "name": "io.github.WYRE-AI/keeper-mcp",
   "title": "Keeper Secrets Manager",
   "description": "Read-only multitenant Streamable HTTP bridge over Keeper Secrets Manager's MCP server.",
   "repository": {
-    "url": "https://github.com/wyre-technology/keeper-mcp",
+    "url": "https://github.com/WYRE-AI/keeper-mcp",
     "source": "github"
   },
   "version": "0.0.0",
-  "websiteUrl": "https://github.com/wyre-technology/keeper-mcp",
+  "websiteUrl": "https://github.com/WYRE-AI/keeper-mcp",
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/wyre-technology/keeper-mcp:0.0.0",
+      "identifier": "ghcr.io/wyre-ai/keeper-mcp:0.0.0",
       "transport": {
         "type": "stdio"
       },

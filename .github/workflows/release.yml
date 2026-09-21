@@ -24,7 +24,7 @@ jobs:
     uses: wyre-technology/.github/.github/workflows/mcp-server-release.yml@8bfc9b3a249fd1e6f69f1d05c45c8eaf3076fec3
     with:
       server-name: keeper-mcp
-      image-name: ghcr.io/wyre-technology/keeper-mcp
+      image-name: ghcr.io/wyre-ai/keeper-mcp
     secrets: inherit
 
 # NO `deploy:` job — deliberate. Keeper is a CONDUIT-ONLY vendor.
