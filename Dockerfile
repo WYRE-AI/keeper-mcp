@@ -62,8 +62,13 @@ RUN npm run lint && npm run build && npm prune --omit=dev
 # ---- Stage 3: runtime image ----
 FROM node:22-bookworm-slim AS runtime
 
+# 0.0.0.0 is the in-container bind. Startup still refuses to listen without
+# a real CONDUIT_S2S_SECRET (known placeholders are rejected). Compose
+# publishes the host port on 127.0.0.1. MCP_ALLOW_INSECURE_DEV is not set;
+# that flag would ignore this address and bind 127.0.0.1 only.
 ENV NODE_ENV=production \
     PORT=8080 \
+    MCP_HTTP_HOST=0.0.0.0 \
     KSM_MCP_BIN=/usr/local/bin/ksm-mcp \
     CHILD_HOME=/tmp/ksm-mcp-home
 

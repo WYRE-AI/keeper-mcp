@@ -14,8 +14,8 @@ Our gateway is multi-tenant: every request carries the calling org's credentials
 
 Because the upstream has no HTTP mode to proxy to, this bridge holds an **MCP client session over stdio** to each tenant child and re-serves it over Streamable HTTP:
 
-1. Listens on `:8080` with `POST /mcp` and `GET /health`.
-2. 401-gates every `/mcp` request on `X-Keeper-Config-Base64` — including validating that it decodes to a usable KSM config. Missing/invalid credentials never fall through to environment credentials; that would be a cross-tenant leak.
+1. Listens on `:8080` with `POST /mcp` and `GET /health`. Refuses to start unless `CONDUIT_S2S_SECRET` is a real secret.
+2. 401-gates every `/mcp` request on `X-Gateway-S2S`, then on `X-Keeper-Config-Base64` — including validating that it decodes to a usable KSM config. Missing/invalid credentials never fall through to environment credentials; that would be a cross-tenant leak. This bridge is gateway mode only.
 3. Lazily spawns one `ksm-mcp serve --batch` child per credential (keyed by a hash), with the tenant's `KSM_CONFIG_BASE64` set, and connects an MCP client to it over stdio.
 4. Serves both protocol eras on `/mcp` via the v2 SDK's `createMcpHandler(factory, { legacy: 'stateless' })` — 2025-era `initialize`-handshake clients (the conduit gateway today) and modern 2026-07-28 envelope clients.
 5. Filters the child's surface through a read-only allowlist in both directions.
@@ -152,16 +152,65 @@ argv: ["serve", "--batch"]
 
 | Env var | Default | Notes |
 |---|---|---|
-| `PORT` | `8080` | Public listen port. |
+| `CONDUIT_S2S_SECRET` | empty (refuses to start) | Service-to-service secret. HTTP logs an error and exits non-zero when this is empty or a known placeholder (`changeme`, `secret`, `replace-me`, `your-s2s-secret`, and the other example values). Generate one with `openssl rand -hex 32`. Compose will not start without it. The value is never logged. |
+| `MCP_ALLOW_INSECURE_DEV` | unset | Set to exactly `1` only for local development to start HTTP without `CONDUIT_S2S_SECRET`. The process logs a warning, does not enforce `X-Gateway-S2S`, and binds `127.0.0.1` only. A non-loopback `MCP_HTTP_HOST` is ignored and the override is logged. A known placeholder secret still refuses to start. |
+| `MCP_HTTP_HOST` | `0.0.0.0` when a real secret is set | Bind address. A configured secret honors this value, including `0.0.0.0`. Unset keeps that historical container bind. The image and Compose set `0.0.0.0` inside the container. Without a secret, the dev bypass forces `127.0.0.1` and does not honor this variable. |
+| `PORT` | `8080` | Public listen port. `MCP_HTTP_PORT` is the fallback when `PORT` is unset. |
 | `KSM_MCP_BIN` | `/usr/local/bin/ksm-mcp` | Upstream binary the bridge spawns. |
 | `CHILD_HOME` | `/tmp/ksm-mcp-home` | Root under which each tenant gets its **own** `HOME` subdirectory, created at spawn. |
 | `IDLE_EVICT_MS` | `900000` | Idle tenant timeout (15 min). Shorter than nutanix-mcp's 60 min on purpose: the Go child restarts in milliseconds, and every minute one stays open is a minute an authenticated KSM session sits in memory. |
 | `SPAWN_TIMEOUT_MS` | `30000` | Max wait for a child to answer the MCP handshake. |
 
+Copy [`.env.example`](.env.example). Leave `CONDUIT_S2S_SECRET` empty in the example; put a real value only in an untracked `.env` or the process environment.
+
+### HTTP authentication
+
+With `CONDUIT_S2S_SECRET` set, every `/mcp` request must include `X-Gateway-S2S`. The check is `verifyS2sHeader` in [`src/s2s-verify.ts`](src/s2s-verify.ts): the header value is `t=<unix seconds>,v1=<hex>`, where the hex is HMAC-SHA256 of the literal string `t=<unix seconds>` keyed with `CONDUIT_S2S_SECRET` (64 lowercase hex characters). The timestamp must be within 300 seconds of the server clock. A missing or invalid header is HTTP 401, before the Keeper credential header is read.
+
+```bash
+TS=$(date +%s)
+SIG=$(printf 't=%s' "$TS" | openssl dgst -sha256 -hmac "$CONDUIT_S2S_SECRET" -hex | awk '{print $NF}')
+curl -sS http://127.0.0.1:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -H "X-Gateway-S2S: t=${TS},v1=${SIG}" \
+  -H "X-Keeper-Config-Base64: $KSM_CONFIG_BASE64" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"0"}}}'
+```
+
+Gateway mode is the only mode. `/mcp` also requires `X-Keeper-Config-Base64`. That header is the only credential source for the request. `KSM_CONFIG_BASE64` in the process environment is not a fallback.
+
+`/health` and `/healthz` stay unauthenticated and do not read credentials.
+
+### Docker
+
+The image listens on `0.0.0.0` inside the container (`MCP_HTTP_HOST`). Publish the port on loopback and pass a real S2S secret. Keeper credentials arrive on each request as headers; they are not read from the environment.
+
+```bash
+docker build -t keeper-mcp .
+docker run \
+  -e CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" \
+  -e MCP_HTTP_HOST=0.0.0.0 \
+  -p 127.0.0.1:8080:8080 \
+  keeper-mcp
+```
+
+Compose refuses to start when `CONDUIT_S2S_SECRET` is unset. The gateway service does not set `KSM_CONFIG_BASE64` or `env_file`, and publishes `127.0.0.1:8080:8080`:
+
+```bash
+CONDUIT_S2S_SECRET="$CONDUIT_S2S_SECRET" docker compose up
+```
+
+Local HTTP without a secret is development-only. It binds `127.0.0.1` and logs a warning. A non-loopback `MCP_HTTP_HOST` (including `0.0.0.0`) is ignored:
+
+```bash
+MCP_ALLOW_INSECURE_DEV=1 npm start
+```
+
 ## Endpoints
 
-- `POST /mcp` — Streamable HTTP MCP, dual-era. Requires the credential header.
-- `GET /health` — unauthenticated liveness. Reports `mode`, served tool count, and live tenant count. Never spawns a child.
+- `POST /mcp` — Streamable HTTP MCP, dual-era. Requires a valid `X-Gateway-S2S` header and `X-Keeper-Config-Base64`.
+- `GET /health` and `GET /healthz` — unauthenticated liveness. Reports `mode`, served tool count, and live tenant count. Never reads credentials and never spawns a child.
 
 ## Development
 
@@ -170,6 +219,12 @@ npm install
 npm run lint     # tsc --noEmit
 npm test         # vitest
 npm run build
+```
+
+HTTP refuses to start until `CONDUIT_S2S_SECRET` is set. For a local listener without a secret:
+
+```bash
+MCP_ALLOW_INSECURE_DEV=1 npm start
 ```
 
 The test suite covers the allowlist policy, the credential contract, and the 401 gate over the real HTTP stack. None of it needs a Keeper account or a running child — the pool is pointed at a nonexistent binary so any accidental spawn fails loudly.
