@@ -46,7 +46,10 @@ beforeAll(async () => {
   // Point at a binary that does not exist: nothing in these tests should ever
   // reach a spawn, and an ENOENT is a loud failure if one does.
   pool = new ChildPool({ upstreamBin: "/nonexistent/ksm-mcp" });
-  bridge = createBridgeHttpServer(pool);
+  // Credential-gate tests exercise the handler with S2S off. Production
+  // startup refuses this unless MCP_ALLOW_INSECURE_DEV=1; passing "" keeps
+  // an ambient CONDUIT_S2S_SECRET from turning these into S2S 401s.
+  bridge = createBridgeHttpServer(pool, { s2sSecret: "" });
   await new Promise<void>((resolve) => bridge.httpServer.listen(0, "127.0.0.1", resolve));
   const { port } = bridge.httpServer.address() as AddressInfo;
   base = `http://127.0.0.1:${port}`;
@@ -139,6 +142,8 @@ describe("routing", () => {
   it("answers CORS preflight with the credential header allowed", async () => {
     const res = await fetch(`${base}/mcp`, { method: "OPTIONS" });
     expect(res.status).toBe(204);
-    expect(res.headers.get("access-control-allow-headers")).toContain("X-Keeper-Config-Base64");
+    const allowHeaders = res.headers.get("access-control-allow-headers");
+    expect(allowHeaders).toContain("X-Keeper-Config-Base64");
+    expect(allowHeaders).toContain("X-Gateway-S2S");
   });
 });

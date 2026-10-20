@@ -1,0 +1,25 @@
+services:
+  # Gateway mode. The Keeper device config arrives per request on
+  # X-Keeper-Config-Base64. Do not set KSM_CONFIG_BASE64 or env_file here —
+  # that would put a static vendor credential in the container. The project
+  # .env is used only for Compose interpolation of CONDUIT_S2S_SECRET.
+  keeper-mcp:
+    build: .
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - PORT=8080
+      - MCP_HTTP_HOST=0.0.0.0
+      - CONDUIT_S2S_SECRET=${CONDUIT_S2S_SECRET:?set CONDUIT_S2S_SECRET}
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
