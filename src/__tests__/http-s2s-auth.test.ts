@@ -318,4 +318,15 @@ describe("HTTP /mcp authentication", () => {
       delete process.env.KSM_CONFIG_BASE64;
     }
   });
+  it("refuses to build an HTTP bridge without a secret unless the bypass is explicit", () => {
+    const saved = process.env.CONDUIT_S2S_SECRET;
+    delete process.env.CONDUIT_S2S_SECRET;
+    try {
+      const pool = new ChildPool();
+      expect(() => createBridgeHttpServer(pool)).toThrow(/CONDUIT_S2S_SECRET is required/);
+      expect(() => createBridgeHttpServer(pool, { s2sSecret: "   " })).toThrow(/CONDUIT_S2S_SECRET is required/);
+    } finally {
+      if (saved !== undefined) process.env.CONDUIT_S2S_SECRET = saved;
+    }
+  });
 });

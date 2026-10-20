@@ -66,6 +66,14 @@ const logError =
 export function createBridgeHttpServer(pool: ChildPool, options: BridgeHttpOptions = {}): BridgeHttp {
   const rawFromEnv = process.env.CONDUIT_S2S_SECRET || "";
   const configured = (options.s2sSecret !== undefined ? options.s2sSecret : rawFromEnv).trim();
+  // Fail closed for direct callers that skip evaluateHttpStartup(). Only an
+  // explicit `s2sSecret: ""` (the insecure-dev decision from startup) may
+  // build a server that skips X-Gateway-S2S. The secret value is never logged.
+  if (configured === "" && options.s2sSecret !== "") {
+    throw new Error(
+      "CONDUIT_S2S_SECRET is required to serve /mcp over HTTP. Pass s2sSecret: \"\" only for the MCP_ALLOW_INSECURE_DEV=1 bypass.",
+    );
+  }
   // A known placeholder must not be the HMAC key. Treat it as "enforce, but
   // no key matches" so a caller that skipped startup still fails closed.
   const placeholderSecret = configured !== "" && isKnownPlaceholderSecret(configured);
