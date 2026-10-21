@@ -25,6 +25,7 @@ import { ALLOWED_TOOL_NAMES } from "./tools.js";
 import { verifyS2sHeader, S2S_HEADER } from "./s2s-verify.js";
 import { isKnownPlaceholderSecret } from "./http-startup.js";
 import type { ChildPool } from "./pool.js";
+import { MAX_REQUEST_BODY_BYTES } from "./input-limits.js";
 
 const CORS_ALLOW_HEADERS = [
   "Content-Type",
@@ -81,6 +82,7 @@ export function createBridgeHttpServer(pool: ChildPool, options: BridgeHttpOptio
 
   const mcpHandler: McpHttpHandler = createMcpHandler(makeMcpServerFactory(pool), {
     legacy: "stateless", // dual-era posture — never 'reject' on fleet servers
+    maxRequestBodySize: MAX_REQUEST_BODY_BYTES,
     onerror: logError("serving"),
   });
   const handleMcp = toNodeHandler(mcpHandler, { onerror: logError("request adapter") });
@@ -132,6 +134,20 @@ export function createBridgeHttpServer(pool: ChildPool, options: BridgeHttpOptio
               message: "Unauthorized: missing or invalid X-Gateway-S2S header (this endpoint only accepts requests signed by the gateway).",
               data: { required: [S2S_HEADER] },
             },
+            id: null,
+          }),
+        );
+        return;
+      }
+
+      // Body cap, after S2S so unauthenticated callers still get 401 first.
+      const declaredLength = Number(headerValue(req.headers["content-length"]));
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32600, message: `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes` },
             id: null,
           }),
         );
