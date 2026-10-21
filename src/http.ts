@@ -140,20 +140,6 @@ export function createBridgeHttpServer(pool: ChildPool, options: BridgeHttpOptio
         return;
       }
 
-      // Body cap, after S2S so unauthenticated callers still get 401 first.
-      const declaredLength = Number(headerValue(req.headers["content-length"]));
-      if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
-        res.writeHead(413, { "Content-Type": "application/json" });
-        res.end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            error: { code: -32600, message: `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes` },
-            id: null,
-          }),
-        );
-        return;
-      }
-
       const result = resolveCredentials((name) => {
         const value = req.headers[name];
         return Array.isArray(value) ? value[0] : value;
@@ -168,6 +154,22 @@ export function createBridgeHttpServer(pool: ChildPool, options: BridgeHttpOptio
               message: `Unauthorized: ${result.error}`,
               data: { required: GATEWAY_HEADERS },
             },
+            id: null,
+          }),
+        );
+        return;
+      }
+
+      // Body cap, after the S2S and credential 401s so unauthenticated callers
+      // never see a 413. Chunked bodies are capped by the transport's
+      // maxRequestBodySize.
+      const declaredLength = Number(headerValue(req.headers["content-length"]));
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_REQUEST_BODY_BYTES) {
+        res.writeHead(413, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            error: { code: -32600, message: `Request body exceeds ${MAX_REQUEST_BODY_BYTES} bytes` },
             id: null,
           }),
         );

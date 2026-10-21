@@ -214,8 +214,8 @@ MCP_ALLOW_INSECURE_DEV=1 npm start
 
 ### Request limits
 
-- **Body cap:** `/mcp` requests larger than 256 KiB (262,144 bytes) are refused with `413` and a JSON-RPC error. The check runs after `X-Gateway-S2S` verification, so unauthenticated callers still get `401`; the SDK enforces the same cap (`maxRequestBodySize`) on the actual body. Addresses GHSA-f897-62hf-6gxq.
-- **Tool-argument cap:** a `tools/call` whose arguments contain more than 10,000 array elements and object keys (counted at every depth) returns an `isError` result and is never forwarded to the Keeper child. Addresses CVE-2026-111768 / GHSA-46jr-4wx8-v453.
+- **Body cap:** `/mcp` requests larger than 256 KiB (262,144 bytes) are refused with `413` and a JSON-RPC error. The check runs after `X-Gateway-S2S` verification and the Keeper credential header check, so unauthenticated callers still get `401`; the SDK enforces the same cap (`maxRequestBodySize`) on the actual body. Addresses GHSA-f897-62hf-6gxq.
+- **Tool-argument cap:** a `tools/call` whose arguments contain more than 10,000 array elements and object keys (counted at every depth) returns an `isError` result with a fixed message (it does not echo the tool name) and is never forwarded to the Keeper child. Addresses CVE-2026-111768 / GHSA-46jr-4wx8-v453.
 - **SDK floor:** `@modelcontextprotocol/server` and `/client` `^2.3.1` (and `/node` `^2.1.1`), per CVE-2026-111770 / GHSA-jm63-cq47-j5jp.
 
 Limits live in `src/input-limits.ts` (Linear WYREAI-454).

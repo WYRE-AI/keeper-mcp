@@ -3,6 +3,7 @@
  * GHSA-f897-62hf-6gxq body cap.
  */
 import { createHmac } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createBridgeHttpServer, type BridgeHttp } from "../http.js";
@@ -43,11 +44,11 @@ describe("countToolInputElements", () => {
   });
 
   it("builds the error result", () => {
-    expect(toolInputTooLargeResult("get_secret")).toEqual({
+    expect(toolInputTooLargeResult()).toEqual({
       content: [
         {
           type: "text",
-          text: "Invalid arguments for tool get_secret: arguments contain more than the maximum of 10000 elements",
+          text: "Tool input exceeds the maximum of 10000 elements",
         },
       ],
       isError: true,
@@ -108,6 +109,7 @@ describe("tools/call element cap through the HTTP handler", () => {
     const text = await res.text();
     expect(res.status).toBe(200);
     expect(text).toContain("maximum of 10000 elements");
+    expect(text).not.toContain("get_secret");
     expect(text).toContain("isError");
     expect(server.getSession).not.toHaveBeenCalled();
     expect(server.pool.size).toBe(0);
@@ -150,6 +152,40 @@ describe("HTTP body cap", () => {
     );
     expect(missing.status).toBe(401);
     expect(invalid.status).toBe(401);
+  });
+
+  it("answers 401, not 413, for valid S2S but a missing credential header", async () => {
+    const server = await listen();
+    const res = await post(server.port, { "X-Gateway-S2S": mint(S2S_SECRET) }, oversized);
+    expect(res.status).toBe(401);
+  });
+
+  it("answers 413 for a chunked body with no Content-Length", async () => {
+    const server = await listen();
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = httpRequest(
+        {
+          host: "127.0.0.1",
+          port: server.port,
+          path: "/mcp",
+          method: "POST",
+          headers: {
+            ...HEADERS,
+            "Transfer-Encoding": "chunked",
+            "X-Gateway-S2S": mint(S2S_SECRET),
+            "X-Keeper-Config-Base64": VALID_CONFIG_B64,
+          },
+        },
+        (r) => {
+          r.resume();
+          resolve(r.statusCode ?? 0);
+        },
+      );
+      req.on("error", reject);
+      req.write(oversized);
+      req.end();
+    });
+    expect(status).toBe(413);
   });
 
   it("still serves a normal small request", async () => {

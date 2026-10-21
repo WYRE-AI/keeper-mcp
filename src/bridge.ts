@@ -88,7 +88,7 @@ export function createBridgeServer(
   server.setRequestHandler("tools/call", async (request) => {
     const toolName = request.params.name;
     // Cap argument size FIRST (CVE-2026-111768): nothing is dispatched or forwarded.
-    if (toolInputTooLarge(request.params.arguments)) return toolInputTooLargeResult(toolName);
+    if (toolInputTooLarge(request.params.arguments)) return toolInputTooLargeResult();
     // Refuse BEFORE touching the pool: a blocked tool must not even cause a
     // child to spawn, and the refusal must not depend on KSM being reachable.
     if (!isAllowed(toolName)) {
@@ -135,7 +135,7 @@ function createUnauthorizedServer(): Server {
   server.setRequestHandler("tools/list", refuse);
   server.setRequestHandler("tools/call", async (request) => {
     if (toolInputTooLarge(request.params.arguments)) {
-      return toolInputTooLargeResult(request.params.name);
+      return toolInputTooLargeResult();
     }
     return refuse();
   });

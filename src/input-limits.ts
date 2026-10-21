@@ -42,16 +42,21 @@ export function countToolInputElements(value: unknown, max: number): number {
   return count;
 }
 
+/** True when `args` holds more than `max` array elements plus object keys, summed over all depths. */
 export function toolInputTooLarge(args: unknown, max: number = MAX_TOOL_INPUT_ELEMENTS): boolean {
   return countToolInputElements(args, max) > max;
 }
 
-export function toolInputTooLargeResult(toolName: string, max: number = MAX_TOOL_INPUT_ELEMENTS) {
+/**
+ * Build the MCP error result for oversize tool input. The message is fixed on
+ * purpose: it never echoes the caller-controlled tool name or arguments (CWE-209).
+ */
+export function toolInputTooLargeResult(max: number = MAX_TOOL_INPUT_ELEMENTS) {
   return {
     content: [
       {
         type: "text" as const,
-        text: `Invalid arguments for tool ${toolName}: arguments contain more than the maximum of ${max} elements`,
+        text: `Tool input exceeds the maximum of ${max} elements`,
       },
     ],
     isError: true as const,
