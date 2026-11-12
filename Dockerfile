@@ -24,7 +24,7 @@
 # ---- Stage 1: build the upstream Go binary ----
 # Built from source rather than pulled from keeper/keeper-mcp-server:latest so
 # the pin is a reviewed git tag we can diff, not a floating upstream tag.
-FROM golang:1.25-alpine AS upstream
+FROM golang:1.26-alpine AS upstream
 
 ENV KSM_MCP_REF=v2.5.0
 WORKDIR /build
@@ -32,6 +32,8 @@ RUN apk add --no-cache git ca-certificates
 RUN git clone --depth=1 --branch "${KSM_MCP_REF}" \
       https://github.com/Keeper-Security/keeper-mcp-golang-docker.git /src/ksm-mcp
 WORKDIR /src/ksm-mcp
+# Pick up Go module security fixes that upstream's go.sum has not yet taken.
+RUN go get golang.org/x/crypto@v0.56.0 golang.org/x/text@v0.41.0 && go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux go build \
       -ldflags="-w -s -extldflags '-static' -X main.Version=${KSM_MCP_REF}" \
       -a -installsuffix cgo \
@@ -61,6 +63,9 @@ RUN npm run lint && npm run build && npm prune --omit=dev
 
 # ---- Stage 3: runtime image ----
 FROM node:22-bookworm-slim AS runtime
+
+# Patch Debian packages released since the base image was built.
+RUN apt-get update && apt-get upgrade -y --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
 # 0.0.0.0 is the in-container bind. Startup still refuses to listen without
 # a real CONDUIT_S2S_SECRET (known placeholders are rejected). Compose
@@ -100,6 +105,10 @@ LABEL org.opencontainers.image.source="https://github.com/WYRE-AI/keeper-mcp" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.description="Read-only multitenant Streamable HTTP bridge over Keeper Secrets Manager's MCP server" \
       io.modelcontextprotocol.server.name="io.github.WYRE-AI/keeper-mcp"
+
+# The runtime only runs `node dist/index.js`; drop the bundled npm CLI and its
+# vulnerable transitive deps.
+RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx
 
 USER node
 EXPOSE 8080
