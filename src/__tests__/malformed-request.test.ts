@@ -43,8 +43,8 @@ function rawRequest(payload: string): Promise<{ status: string; body: string }> 
     socket.on('data', (chunk) => (data += chunk));
     socket.on('error', reject);
     socket.on('close', () => {
-      const [head, body = ''] = data.split('\r\n\r\n');
-      resolve({ status: head.split('\r\n')[0], body });
+      const [head = '', body = ''] = data.split('\r\n\r\n');
+      resolve({ status: head.split('\r\n')[0] ?? '', body });
     });
   });
 }
